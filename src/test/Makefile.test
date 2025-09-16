@@ -1,0 +1,113 @@
+# ====================================================================
+# Makefile for CUDA NeRF - Multiple Integration Tests
+#
+# This Makefile discovers multiple test files and builds a separate
+# executable for each one.
+#
+# Usage:
+#   cd src/test
+#   make -f Makefile.test           # Build all test executables
+#   make -f Makefile.test run       # Build and run all tests
+#   make -f Makefile.test clean     # Clean up all test files
+#
+# ====================================================================
+
+
+# --- Compiler and Flags ---
+CXX := g++
+NVCC := nvcc
+DEBUG ?= 0
+ARCH ?= 86
+
+# --- Directory and Executable Configuration (Paths are relative to this folder) ---
+ROOT_DIR := ../..
+BIN_DIR := $(ROOT_DIR)/bin
+TEST_TARGETS := renderer_test mlp_test
+
+# --- Include & Linker Paths/Flags ---
+INCLUDES := -I$(ROOT_DIR)/include -I/usr/local/include -I/usr/local/include/opencv4
+LDFLAGS := -L/usr/local/lib -L/usr/local/cuda-13.0/lib64 -Xcompiler -fopenmp
+LDLIBS := -lopencv_core -lopencv_imgcodecs -lopencv_highgui -lopencv_imgproc \
+          -lcublas -lcublasLt -lcudart -lcusolver -lnccl -lgomp
+
+# --- Compiler Flags ---
+BASE_CXXFLAGS := -std=c++17 -Wall
+ifeq ($(DEBUG), 1)
+    OPTIMIZER_FLAGS := -O0
+    DEBUGGER_FLAGS := -g -G
+    HOST_DEBUG_FLAGS := -g
+else
+    OPTIMIZER_FLAGS := -O3
+    DEBUGGER_FLAGS :=
+endif
+HOST_CXXFLAGS := $(BASE_CXXFLAGS) $(HOST_DEBUG_FLAGS)
+NVCCFLAGS := --expt-relaxed-constexpr $(OPTIMIZER_FLAGS) $(DEBUGGER_FLAGS) \
+             -gencode arch=compute_$(ARCH),code=sm_$(ARCH) \
+             -diag-suppress=549 -diag-suppress=20096 -DCUB_IGNORE_DEPRECATED_API \
+             -DTHRUST_IGNORE_DEPRECATED_CPP_DIALECT -Xcompiler "-fopenmp" \
+             -Xcompiler "$(HOST_CXXFLAGS)"
+CXXFLAGS := $(HOST_CXXFLAGS)
+
+# --- Source File Logic (CORRECTED PATHS) ---
+
+# 1. Define all entry points relative to src/test/
+MAIN_APP_SOURCE := $(ROOT_DIR)/main.cu
+TEST_SOURCES := $(foreach test,$(TEST_TARGETS),$(test).cu) # These files are in the current dir
+
+# 2. Discover all project "library" source files relative to src/test/
+LIB_SRC_DIRS := $(ROOT_DIR)/src/nerf $(ROOT_DIR)/src/dataset $(ROOT_DIR)/src/common
+LIB_SRCS := $(foreach dir,$(LIB_SRC_DIRS),$(wildcard $(dir)/*.cu) $(wildcard $(dir)/*.cpp))
+
+# 3. Generate the list of all object files that will need to be built
+LIB_OBJS := $(patsubst $(ROOT_DIR)/%.cu,$(ROOT_DIR)/%.o,$(filter %.cu,$(LIB_SRCS)))
+LIB_OBJS += $(patsubst $(ROOT_DIR)/%.cpp,$(ROOT_DIR)/%.o,$(filter %.cpp,$(LIB_SRCS)))
+TEST_OBJS := $(TEST_SOURCES:.cu=.o)
+OBJS := $(LIB_OBJS) $(TEST_OBJS)
+DEPS := $(OBJS:.o=.d)
+
+# --- Build Rules (CORRECTED PATHS) ---
+TEST_EXECS := $(foreach test,$(TEST_TARGETS),$(BIN_DIR)/$(test))
+
+all: $(TEST_EXECS)
+
+run: $(TEST_EXECS)
+	@echo "---"
+	@$(foreach exec,$(TEST_EXECS), \
+		echo "🚀 Running test: $(exec)"; \
+		$(exec); \
+		echo "---";)
+	@echo "✅ All tests completed."
+
+# Generic rule to build any test executable in the ../../bin/ directory.
+$(BIN_DIR)/%: %.o $(LIB_OBJS)
+	@echo "🔗 Linking test executable: $@"
+	@mkdir -p $(@D)
+	$(NVCC) $(DEBUGGER_FLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+# --- Compilation and Dependency Rules ---
+# These rules now correctly handle sources from parent directories (e.g., ../../src/nerf/mlp.cu)
+# and place the object files next to them (e.g., ../../src/nerf/mlp.o).
+# This is a bit more complex, so we need separate rules.
+
+# Rule for test sources in the current directory (src/test/)
+%.o: %.cu
+	$(NVCC) $(INCLUDES) $(NVCCFLAGS) -c $< -o $@ -MMD -MP
+
+# Rule for library sources in other directories
+$(ROOT_DIR)/%.o: $(ROOT_DIR)/%.cu
+	$(NVCC) $(INCLUDES) $(NVCCFLAGS) -c $< -o $@ -MMD -MP
+$(ROOT_DIR)/%.o: $(ROOT_DIR)/%.cpp
+	$(CXX) $(INCLUDES) $(CXXFLAGS) -c $< -o $@ -MMD -MP
+
+-include $(DEPS)
+
+# --- Clean Rule ---
+clean:
+	@echo "🧹 Cleaning up generated test files and objects..."
+	rm -rf $(BIN_DIR)
+	# This will find and remove all .o and .d files in the project
+	find $(ROOT_DIR) -name "*.o" -type f -delete
+	find $(ROOT_DIR) -name "*.d" -type f -delete
+	@echo "Test cleanup complete."
+
+.PHONY: all clean run
